@@ -22,6 +22,8 @@ Se abre en http://localhost:8501. Para detenerlo, presiona `Ctrl + C` en la term
 | `app.py` | El dashboard |
 | `generar_datos.py` | Crea `ventas_tienda.xlsx`; la semilla fija da siempre los mismos datos |
 | `ventas_tienda.xlsx` | Datos de ejemplo |
+| `plantilla-tienda-farmacia.xlsx` | Plantilla en blanco que se descarga desde la barra lateral |
+| `.gitignore` | Evita subir Excel de clientes, entornos y secretos |
 | `requirements.txt` | Librerías que instala Streamlit Community Cloud |
 | `.streamlit/config.toml` | Colores del tema |
 
@@ -32,6 +34,31 @@ Hoja **Ventas**: `Fecha`, `Hora`, `Ticket`, `Producto`, `Categoría`, `Cantidad`
 Hoja **Gastos**: `Mes` (cualquier fecha de ese mes), `Concepto`, `Monto`.
 
 Hoja **Inventario**: `Producto`, `Existencia`.
+
+## Cómo se publica
+
+Demo en línea: https://demo-tienda.streamlit.app/
+
+Está en Streamlit Community Cloud y se actualiza solo con cada push a la rama `main`:
+
+```powershell
+git add .
+git commit -m "Describe tu cambio"
+git push origin main
+```
+
+Streamlit apaga las apps gratuitas sin visitas: abre el demo antes de cada reunión.
+
+## Dónde se cambian los datos
+
+- **Datos de ejemplo:** edita los catálogos y parámetros de `generar_datos.py` y ejecuta `python generar_datos.py`. Se reescribe `ventas_tienda.xlsx`.
+- **Nombre del negocio de ejemplo:** constante `NEGOCIO_DEMO`, al inicio de `app.py`.
+- **Plantilla:** reemplaza `plantilla-tienda-farmacia.xlsx` por la versión de la carpeta `plantillas/`.
+- **Excel de un cliente:** se sube desde la barra lateral. Nunca se copia a este repositorio; se guarda solo en `C:\Users\eric\clientes\`.
+
+## Privacidad del Excel subido
+
+La app no escribe el archivo en disco ni lo manda a otro servicio. Se procesa en el servidor de Streamlit y queda solo en la sesión de la visita (`st.session_state`), que se borra al cerrarla. No uses `st.cache_data` con datos subidos: esa caché sobrevive a la visita, y dejaría de ser cierto el texto que se muestra bajo el botón de subir.
 
 ## Cómo se calculan los indicadores
 

@@ -4,6 +4,8 @@ Uso: streamlit run app.py
 """
 
 import calendar
+import re
+import unicodedata
 from datetime import date, timedelta
 from io import BytesIO
 from pathlib import Path
@@ -13,6 +15,10 @@ import plotly.graph_objects as go
 import streamlit as st
 
 ARCHIVO_DEMO = Path(__file__).parent / "ventas_tienda.xlsx"
+PLANTILLA = Path(__file__).parent / "plantilla-tienda-farmacia.xlsx"
+NEGOCIO_DEMO = "Abarrotes El Puerto"
+NEGOCIO_VACIO = "Tu negocio"
+MIME_EXCEL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 # ---------------------------------------------------------------------------
 # Paleta: la misma de la página. Los colores de datos están validados contra
@@ -73,6 +79,12 @@ def mes_es(periodo):
     return f"{MESES[periodo.month - 1]} {periodo.year}"
 
 
+def nombre_archivo(negocio):
+    """Convierte "Doña Lupe, Centro" en dona_lupe_centro para nombrar archivos."""
+    sin_acentos = unicodedata.normalize("NFKD", negocio).encode("ascii", "ignore").decode()
+    return re.sub(r"[^a-z0-9]+", "_", sin_acentos.lower()).strip("_") or "tu_negocio"
+
+
 # ---------------------------------------------------------------------------
 # Carga y validación del Excel
 # ---------------------------------------------------------------------------
@@ -117,8 +129,7 @@ def limpiar_inventario(inventario):
     return inventario.dropna(subset=["Existencia"]).groupby("Producto", as_index=False)["Existencia"].sum()
 
 
-@st.cache_data(show_spinner="Cargando datos…", max_entries=4)
-def cargar_libro(contenido):
+def leer_libro(contenido):
     """Recibe los bytes del Excel y devuelve (ventas, gastos por mes, inventario)."""
     try:
         hojas = pd.read_excel(BytesIO(contenido), sheet_name=None, engine="openpyxl")
@@ -128,6 +139,25 @@ def cargar_libro(contenido):
     gastos = limpiar_gastos(leer_hoja(hojas, "Gastos", COLUMNAS_GASTOS))
     inventario = limpiar_inventario(leer_hoja(hojas, "Inventario", COLUMNAS_INVENTARIO))
     return ventas, gastos, inventario
+
+
+@st.cache_data(show_spinner="Cargando datos…")
+def cargar_demo():
+    """Lee el Excel de ejemplo; solo estos datos ficticios van a la caché."""
+    return leer_libro(ARCHIVO_DEMO.read_bytes())
+
+
+def cargar_subido(subido):
+    """Lee el Excel subido y lo guarda solo en la sesión de esta visita.
+
+    No usa st.cache_data: esa caché es del servidor y sobreviviría a la visita.
+    """
+    if st.session_state.get("libro_id") != subido.file_id:
+        with st.spinner("Cargando datos…"):
+            libro = leer_libro(subido.getvalue())
+        st.session_state["libro"] = libro
+        st.session_state["libro_id"] = subido.file_id
+    return st.session_state["libro"]
 
 
 # ---------------------------------------------------------------------------
@@ -277,7 +307,7 @@ def grafica_ventas_diarias(ventas, inicio, fin):
     ))
     marcas, textos = marcas_fecha(dias)
     fig.update_xaxes(tickvals=marcas, ticktext=textos, showgrid=False)
-    fig.update_yaxes(tickprefix="$", tickformat=",.0f", rangemode="tozero")
+    fig.update_yaxes(tickprefix="$", tickformat=",.2f", rangemode="tozero")
     return estilo(fig)
 
 
@@ -292,11 +322,13 @@ def grafica_calor(ventas):
         colorscale=[[0, "#16273F"], [1, ACENTO]], xgap=2, ygap=2,
         customdata=[[moneda(v) for v in fila] for fila in tabla.values],
         hovertemplate="%{y} a las %{x}<br><b>%{customdata}</b><extra></extra>",
-        colorbar=dict(thickness=10, tickprefix="$", tickformat="~s", outlinewidth=0),
+        # Horizontal: en celular una barra vertical con centavos le quita ancho al mapa
+        colorbar=dict(orientation="h", y=-0.14, yanchor="top", thickness=10, nticks=4,
+                      tickprefix="$", tickformat=",.2f", outlinewidth=0),
     ))
     fig.update_xaxes(showgrid=False, type="category")
     fig.update_yaxes(showgrid=False, autorange="reversed")
-    return estilo(fig, alto=360)
+    return estilo(fig, alto=410)
 
 
 def grafica_barras_h(etiquetas, valores, hover, texto, alto=None):
@@ -372,11 +404,12 @@ def grafica_mensual(ventas, gastos, inicio, fin):
             hovertemplate=f"{nombre}: <b>%{{customdata}}</b><extra></extra>",
         ))
     # Solo la utilidad lleva etiqueta: es el dato que importa de esta gráfica
-    fig.data[2].update(text=[f"{'-' if v < 0 else ''}${abs(v) / 1000:,.0f} mil" for v in utilidad.values],
-                       textposition="outside", textfont=dict(color=TEXTO), cliponaxis=False, constraintext="none")
+    fig.data[2].update(text=[moneda(v) for v in utilidad.values],
+                       textposition="outside", textangle=-90, textfont=dict(color=TEXTO), cliponaxis=False,
+                       constraintext="none")
     fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.06, hovermode="x unified")
     fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(tickprefix="$", tickformat=",.0f")
+    fig.update_yaxes(tickprefix="$", tickformat=",.2f")
     return estilo(fig, alto=400, leyenda=True)
 
 
@@ -404,15 +437,17 @@ def aplicar_css():
 
 
 def elegir_origen():
-    """Devuelve (bytes del Excel, nombre, si son datos de la demo)."""
-    with st.sidebar.expander("Usar mi propio Excel"):
+    """Dibuja la sección de datos y devuelve (archivo subido o None, nombre del negocio)."""
+    with st.sidebar.expander("Usar mi propio Excel", expanded=True):
+        negocio = st.text_input("Nombre del negocio", max_chars=60, placeholder=NEGOCIO_VACIO)
         st.caption("Debe tener las hojas Ventas, Gastos e Inventario con las mismas columnas que el ejemplo.")
         subido = st.file_uploader("Sube tu archivo .xlsx", type="xlsx")
+        st.caption("Tu archivo se procesa solo durante tu visita y no se guarda.")
+        st.download_button("Descargar plantilla en blanco", PLANTILLA.read_bytes(), file_name=PLANTILLA.name,
+                           mime=MIME_EXCEL, width="stretch")
         st.download_button("Descargar Excel de ejemplo", ARCHIVO_DEMO.read_bytes(),
-                           file_name=ARCHIVO_DEMO.name, width="stretch")
-    if subido is not None:
-        return subido.getvalue(), subido.name, False
-    return ARCHIVO_DEMO.read_bytes(), ARCHIVO_DEMO.name, True
+                           file_name=ARCHIVO_DEMO.name, mime=MIME_EXCEL, width="stretch")
+    return subido, negocio.strip()
 
 
 def elegir_filtros(ventas, origen):
@@ -525,24 +560,38 @@ def mostrar_resurtir(ventas, inventario):
 
 def mostrar_pie(es_demo):
     """Pie de página; "Datos ficticios" solo aplica al Excel de ejemplo."""
-    texto = "Demo creada por Eleva Dev · Datos ficticios" if es_demo else "Demo creada por Eleva Dev"
+    texto = "Demo creada por Eleva Dev · Datos ficticios" if es_demo else "Tablero creado por Eleva Dev"
     st.markdown(f'<div class="pie-demo">{texto}</div>', unsafe_allow_html=True)
 
 
 def main():
-    st.set_page_config(page_title="Dashboard de Ventas · Abarrotes El Puerto", page_icon="📊", layout="wide")
+    st.set_page_config(page_title=f"Dashboard de Ventas · {NEGOCIO_DEMO}", page_icon="📊", layout="wide")
     aplicar_css()
-    st.title("Dashboard de Ventas · Abarrotes El Puerto")
+    zona_titulo = st.empty()  # el título depende del Excel, que se conoce después
+    subido, negocio = elegir_origen()
 
-    contenido, nombre, es_demo = elegir_origen()
-    try:
-        ventas, gastos, inventario = cargar_libro(contenido)
-    except ErrorFormato as error:
-        st.error(f"No pude leer tu Excel. {error} Te muestro los datos de ejemplo.")
-        contenido, nombre, es_demo = ARCHIVO_DEMO.read_bytes(), ARCHIVO_DEMO.name, True
-        ventas, gastos, inventario = cargar_libro(contenido)
+    libro, origen = None, "demo"
+    if subido is None:
+        st.session_state.pop("libro", None)
+        st.session_state.pop("libro_id", None)
+    else:
+        try:
+            libro, origen = cargar_subido(subido), subido.file_id
+        except ErrorFormato as error:
+            st.error(f"No pude leer tu Excel. {error} Te muestro los datos de ejemplo.")
 
-    inicio, fin, categorias, metodos = elegir_filtros(ventas, nombre)
+    es_demo = libro is None
+    if es_demo:
+        libro = cargar_demo()
+        st.info("Estás viendo datos ficticios. Sube tu Excel en la barra lateral para ver tu propio tablero.")
+
+    nombre_negocio = NEGOCIO_DEMO if es_demo else negocio or NEGOCIO_VACIO
+    titulo = f"Dashboard de Ventas · {nombre_negocio}"
+    st.set_page_config(page_title=titulo, page_icon="📊", layout="wide")
+    zona_titulo.title(titulo)
+
+    ventas, gastos, inventario = libro
+    inicio, fin, categorias, metodos = elegir_filtros(ventas, origen)
     filtradas = filtrar_ventas(ventas, inicio, fin, categorias, metodos)
 
     if filtradas.empty:
@@ -551,8 +600,7 @@ def main():
         mostrar_indicadores(ventas, gastos, filtradas, inicio, fin, categorias, metodos)
         mostrar_graficas(ventas, gastos, filtradas, inicio, fin)
         st.download_button("Descargar datos filtrados en Excel", excel_filtrado(filtradas),
-                           file_name="ventas_filtradas.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+                           file_name=f"ventas_{nombre_archivo(nombre_negocio)}.xlsx", mime=MIME_EXCEL)
     mostrar_resurtir(ventas, inventario)
     mostrar_pie(es_demo)
 
