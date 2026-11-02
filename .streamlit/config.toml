@@ -1,0 +1,14 @@
+# Tema visual, con los mismos colores de la página de Eleva Dev
+[theme]
+base = "dark"
+primaryColor = "#2DE2C5"
+backgroundColor = "#0B1628"
+secondaryBackgroundColor = "#12213A"
+textColor = "#EDF2F9"
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"
+
+[browser]
+gatherUsageStats = false
