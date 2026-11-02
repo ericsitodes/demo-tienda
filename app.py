@@ -301,13 +301,14 @@ def grafica_ventas_diarias(ventas, inicio, fin):
     dias = pd.date_range(inicio, fin)
     serie = ventas.groupby("Fecha")["Total"].sum().reindex(dias, fill_value=0)
     fig = go.Figure(go.Scatter(
-        x=dias, y=serie.values, mode="lines", line=dict(color=ACENTO, width=2),
+        x=dias, y=serie.values, mode="lines+markers" if len(dias) == 1 else "lines",  # un solo día no traza línea
+        line=dict(color=ACENTO, width=2),
         customdata=[[fecha_larga(d), moneda(v)] for d, v in serie.items()],
         hovertemplate="%{customdata[0]}<br><b>%{customdata[1]}</b><extra></extra>",
     ))
     marcas, textos = marcas_fecha(dias)
     fig.update_xaxes(tickvals=marcas, ticktext=textos, showgrid=False)
-    fig.update_yaxes(tickprefix="$", tickformat=",.2f", rangemode="tozero")
+    fig.update_yaxes(tickformat="$,.2f", rangemode="tozero")
     return estilo(fig)
 
 
@@ -409,7 +410,7 @@ def grafica_mensual(ventas, gastos, inicio, fin):
                        constraintext="none")
     fig.update_layout(barmode="group", bargap=0.3, bargroupgap=0.06, hovermode="x unified")
     fig.update_xaxes(showgrid=False)
-    fig.update_yaxes(tickprefix="$", tickformat=",.2f")
+    fig.update_yaxes(tickformat="$,.2f")
     return estilo(fig, alto=400, leyenda=True)
 
 
