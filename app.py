@@ -441,9 +441,9 @@ def elegir_origen():
     with st.sidebar.expander("Usar mi propio Excel", expanded=True):
         negocio = st.text_input("Nombre del negocio", max_chars=60, placeholder=NEGOCIO_VACIO)
         st.caption("Debe tener las hojas Ventas, Gastos e Inventario con las mismas columnas que el ejemplo.")
-        subido = st.file_uploader("Sube tu archivo .xlsx", type="xlsx")
+        subido = st.file_uploader("Sube tu archivo de Excel", type="xlsx")
         st.caption("Tu archivo se procesa solo durante tu visita y no se guarda.")
-        st.download_button("Descargar plantilla en blanco", PLANTILLA.read_bytes(), file_name=PLANTILLA.name,
+        st.download_button("Descargar hoja para llenar", PLANTILLA.read_bytes(), file_name=PLANTILLA.name,
                            mime=MIME_EXCEL, width="stretch")
         st.download_button("Descargar Excel de ejemplo", ARCHIVO_DEMO.read_bytes(),
                            file_name=ARCHIVO_DEMO.name, mime=MIME_EXCEL, width="stretch")
@@ -457,7 +457,7 @@ def elegir_filtros(ventas, origen):
     # Por defecto, los últimos 3 meses: deja un periodo anterior para comparar
     inicial = max(primera, (pd.Period(ultima, freq="M") - 2).start_time.date())
 
-    st.sidebar.header("Filtros")
+    st.sidebar.header("Ver por fecha o categoría")
     rango = st.sidebar.date_input("Rango de fechas", value=(inicial, ultima), min_value=primera,
                                   max_value=ultima, format="DD/MM/YYYY", key=f"fechas_{origen}")
     # Mientras la persona elige la segunda fecha, llega solo una
@@ -559,13 +559,13 @@ def mostrar_resurtir(ventas, inventario):
 
 
 def mostrar_pie(es_demo):
-    """Pie de página; "Datos ficticios" solo aplica al Excel de ejemplo."""
-    texto = "Demo creada por Eleva Dev · Datos ficticios" if es_demo else "Tablero creado por Eleva Dev"
+    """Pie de página; "de ejemplo" solo aplica al Excel de ejemplo."""
+    texto = "Tablero de ejemplo creado por Eleva Dev" if es_demo else "Tablero creado por Eleva Dev"
     st.markdown(f'<div class="pie-demo">{texto}</div>', unsafe_allow_html=True)
 
 
 def main():
-    st.set_page_config(page_title=f"Dashboard de Ventas · {NEGOCIO_DEMO}", page_icon="📊", layout="wide")
+    st.set_page_config(page_title=f"Tablero de ventas · {NEGOCIO_DEMO}", page_icon="📊", layout="wide")
     aplicar_css()
     zona_titulo = st.empty()  # el título depende del Excel, que se conoce después
     subido, negocio = elegir_origen()
@@ -583,10 +583,10 @@ def main():
     es_demo = libro is None
     if es_demo:
         libro = cargar_demo()
-        st.info("Estás viendo datos ficticios. Sube tu Excel en la barra lateral para ver tu propio tablero.")
+        st.info("Este es un tablero de ejemplo. Sube tu Excel en el menú lateral para ver el tuyo.")
 
     nombre_negocio = NEGOCIO_DEMO if es_demo else negocio or NEGOCIO_VACIO
-    titulo = f"Dashboard de Ventas · {nombre_negocio}"
+    titulo = f"Tablero de ventas · {nombre_negocio}"
     st.set_page_config(page_title=titulo, page_icon="📊", layout="wide")
     zona_titulo.title(titulo)
 

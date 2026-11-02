@@ -22,7 +22,7 @@ Se abre en http://localhost:8501. Para detenerlo, presiona `Ctrl + C` en la term
 | `app.py` | El dashboard |
 | `generar_datos.py` | Crea `ventas_tienda.xlsx`; la semilla fija da siempre los mismos datos |
 | `ventas_tienda.xlsx` | Datos de ejemplo |
-| `plantilla-tienda-farmacia.xlsx` | Plantilla en blanco que se descarga desde la barra lateral |
+| `plantilla-tienda-farmacia.xlsx` | Hoja para llenar que se descarga desde la barra lateral |
 | `.gitignore` | Evita subir Excel de clientes, entornos y secretos |
 | `requirements.txt` | Librerías que instala Streamlit Community Cloud |
 | `.streamlit/config.toml` | Colores del tema |
