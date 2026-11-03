@@ -13,12 +13,17 @@ from pathlib import Path
 import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
+from openpyxl import load_workbook
 
 ARCHIVO_DEMO = Path(__file__).parent / "ventas_tienda.xlsx"
 PLANTILLA = Path(__file__).parent / "plantilla-tienda-farmacia.xlsx"
 NEGOCIO_DEMO = "Abarrotes El Puerto"
 NEGOCIO_VACIO = "Tu negocio"
 MIME_EXCEL = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+WHATSAPP = "https://wa.me/529212223293"
+LIMITE_FILAS = 200_000  # filas de la hoja Ventas; el tamaño lo limita config.toml (10 MB)
+MENSAJE_ERROR = ("No pudimos leer tu archivo. Revisa que tenga el formato de la hoja para llenar "
+                 f"o [escríbeme por WhatsApp]({WHATSAPP}).")
 
 # ---------------------------------------------------------------------------
 # Paleta: la misma de la página. Los colores de datos están validados contra
@@ -39,10 +44,16 @@ COLOR_CATEGORIA = dict(zip(['Abarrotes', 'Bebidas', 'Botanas', 'Lácteos', 'Limp
 # Fechas en español escritas a mano: en la nube no hay locale es_MX instalado
 MESES = ["ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]
 DIAS = ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"]
+# Meses en español dentro de fechas escritas como texto, para poder leerlas
+MESES_TEXTO = {"enero": "jan", "febrero": "feb", "marzo": "mar", "abril": "apr", "mayo": "may",
+               "junio": "jun", "julio": "jul", "agosto": "aug", "septiembre": "sep", "setiembre": "sep",
+               "octubre": "oct", "noviembre": "nov", "diciembre": "dec",
+               "ene": "jan", "abr": "apr", "ago": "aug", "dic": "dec"}
 
 COLUMNAS_VENTAS = ["Fecha", "Hora", "Ticket", "Producto", "Categoría", "Cantidad",
                    "Precio unitario", "Total", "Método de pago", "Cajero"]
 COLUMNAS_GASTOS = ["Mes", "Concepto", "Monto"]
+COLUMNAS_TEXTO = ("Producto", "Categoría", "Método de pago", "Cajero")  # se limpian de espacios de más
 COLUMNAS_INVENTARIO = ["Producto", "Existencia"]
 
 # Resurtido: días de venta que se promedian y umbrales de alerta
@@ -53,6 +64,10 @@ DIAS_PRONTO = 15
 
 class ErrorFormato(Exception):
     """El Excel subido no tiene el formato esperado."""
+
+
+class ArchivoGrande(ErrorFormato):
+    """La hoja Ventas pasa de LIMITE_FILAS."""
 
 
 # ---------------------------------------------------------------------------
@@ -88,57 +103,138 @@ def nombre_archivo(negocio):
 # ---------------------------------------------------------------------------
 # Carga y validación del Excel
 # ---------------------------------------------------------------------------
+def clave(texto):
+    """Compara nombres sin mayúsculas, acentos ni espacios de más: " CATEGORIA " = "Categoría"."""
+    sin_acentos = unicodedata.normalize("NFKD", str(texto)).encode("ascii", "ignore").decode()
+    return " ".join(sin_acentos.lower().split())
+
+
+def buscar_hoja(hojas, nombre):
+    """Devuelve el nombre real de la hoja, o explica cuáles trae el archivo."""
+    for real in hojas:
+        if clave(real) == clave(nombre):
+            return real
+    raise ErrorFormato(f'Falta la hoja "{nombre}". Tu archivo tiene: {", ".join(map(str, hojas))}.')
+
+
 def leer_hoja(hojas, nombre, columnas):
-    """Toma una hoja y comprueba que traiga todas las columnas."""
-    if nombre not in hojas:
-        raise ErrorFormato(f'Falta la hoja "{nombre}".')
-    tabla = hojas[nombre]
-    tabla.columns = [str(c).strip() for c in tabla.columns]
-    faltantes = [c for c in columnas if c not in tabla.columns]
+    """Toma una hoja y comprueba que traiga todas las columnas, en cualquier orden."""
+    tabla = hojas[buscar_hoja(hojas, nombre)]
+    reales = {clave(c): c for c in tabla.columns}
+    faltantes = [c for c in columnas if clave(c) not in reales]
     if faltantes:
         raise ErrorFormato(f'A la hoja "{nombre}" le faltan columnas: {", ".join(faltantes)}.')
-    return tabla[columnas].copy()
+    tabla = tabla[[reales[clave(c)] for c in columnas]].copy()
+    tabla.columns = columnas
+    return tabla.dropna(how="all")  # las filas vacías no cuentan como errores
 
 
-def limpiar_ventas(ventas):
-    """Convierte los tipos de la hoja Ventas y descarta filas inservibles."""
-    ventas["Fecha"] = pd.to_datetime(ventas["Fecha"], errors="coerce", dayfirst=True).dt.normalize()
-    ventas["Total"] = pd.to_numeric(ventas["Total"], errors="coerce")
-    ventas["Cantidad"] = pd.to_numeric(ventas["Cantidad"], errors="coerce")
+def a_numero(serie):
+    """Convierte números escritos como texto ("$1,250.50"); lo que no es número queda vacío."""
+    if pd.api.types.is_numeric_dtype(serie):
+        return serie
+    texto = serie.astype("string").str.replace(r"[$,\s]", "", regex=True)
+    return pd.to_numeric(texto, errors="coerce").astype("float64")
+
+
+def a_fecha(serie):
+    """Lee fechas reales y de texto: 15/07/2026, 2026-07-15, 15 jul 2026 o 15 de julio de 2026."""
+    if pd.api.types.is_datetime64_any_dtype(serie):
+        return serie
+    texto = serie.astype("string").str.strip().str.lower().str.replace(r"\bde\b", " ", regex=True)
+    texto = texto.str.replace(r"\b(" + "|".join(MESES_TEXTO) + r")\b",
+                              lambda m: MESES_TEXTO[m.group(1)], regex=True)
+    anio_primero = texto.str.match(r"\d{4}[-/]").fillna(False).astype(bool)  # 2026-07-15
+    con_dia_primero = pd.to_datetime(texto.where(~anio_primero), errors="coerce", dayfirst=True, format="mixed")
+    con_anio_primero = pd.to_datetime(texto.where(anio_primero), errors="coerce", format="mixed")
+    fechas = con_dia_primero.fillna(con_anio_primero)
+    # Sin año ("julio 4") se lee como el año 1: una fecha así no es confiable
+    return fechas.where(fechas.dt.year.between(2000, 2100))
+
+
+def filas_texto(n):
+    """1 -> "1 fila"; 3 -> "3 filas"."""
+    return f"{n:,} fila" if n == 1 else f"{n:,} filas"
+
+
+def limpiar_ventas(ventas, avisos):
+    """Convierte los tipos de la hoja Ventas y descarta filas inservibles, avisando cuántas."""
+    ventas["Fecha"] = a_fecha(ventas["Fecha"]).dt.normalize()
+    ventas["Total"] = a_numero(ventas["Total"])
+    ventas["Cantidad"] = a_numero(ventas["Cantidad"])
     ventas["HoraNum"] = pd.to_datetime(ventas["Hora"].astype(str), errors="coerce", format="mixed").dt.hour
+    antes = len(ventas)
     ventas = ventas.dropna(subset=["Fecha", "Total", "Cantidad", "HoraNum"])
     if ventas.empty:
         raise ErrorFormato('La hoja "Ventas" no tiene filas válidas.')
+    if len(ventas) < antes:
+        avisos.append(f'No se incluyeron {filas_texto(antes - len(ventas))} de "Ventas" porque la fecha, '
+                      "la hora, la cantidad o el total están vacíos o no se entienden.")
     ventas = ventas.assign(HoraNum=ventas["HoraNum"].astype(int))
-    for columna in ("Producto", "Categoría", "Método de pago", "Cajero"):
+    for columna in COLUMNAS_TEXTO:
         ventas[columna] = ventas[columna].astype(str).str.strip()
     return ventas
 
 
-def limpiar_gastos(gastos):
+def limpiar_gastos(gastos, avisos):
     """Convierte los tipos de la hoja Gastos y agrega el total por mes."""
-    gastos["Mes"] = pd.to_datetime(gastos["Mes"], errors="coerce", dayfirst=True).dt.to_period("M")
-    gastos["Monto"] = pd.to_numeric(gastos["Monto"], errors="coerce")
-    return gastos.dropna(subset=["Mes", "Monto"]).groupby("Mes")["Monto"].sum()
+    gastos["Mes"] = a_fecha(gastos["Mes"]).dt.to_period("M")
+    gastos["Monto"] = a_numero(gastos["Monto"])
+    validos = gastos.dropna(subset=["Mes", "Monto"])
+    if len(validos) < len(gastos):
+        avisos.append(f'No se incluyeron {filas_texto(len(gastos) - len(validos))} de "Gastos" porque el mes '
+                      "o el monto están vacíos o no se entienden.")
+    return validos.groupby("Mes")["Monto"].sum()
 
 
 def limpiar_inventario(inventario):
     """Convierte los tipos de la hoja Inventario y suma productos repetidos."""
     inventario["Producto"] = inventario["Producto"].astype(str).str.strip()
-    inventario["Existencia"] = pd.to_numeric(inventario["Existencia"], errors="coerce")
+    inventario["Existencia"] = a_numero(inventario["Existencia"])
     return inventario.dropna(subset=["Existencia"]).groupby("Producto", as_index=False)["Existencia"].sum()
 
 
+def contar_filas(contenido):
+    """Cuenta las filas de la hoja Ventas sin leer todo el archivo; None si no se puede saber."""
+    try:
+        libro = load_workbook(BytesIO(contenido), read_only=True)
+        for hoja in libro.worksheets:
+            if clave(hoja.title) == clave("Ventas"):
+                if hoja.max_row is not None:
+                    return hoja.max_row
+                # Algunos programas no guardan el tamaño de la hoja: contar hasta pasar el límite
+                filas = 0
+                for filas, _ in enumerate(hoja.iter_rows(values_only=True), start=1):
+                    if filas > LIMITE_FILAS + 1:
+                        break
+                return filas
+    except Exception:
+        pass  # si no abre, pd.read_excel dará el mensaje
+    return None
+
+
+def revisar_tamano(filas):
+    """Detiene la lectura si la hoja Ventas pasa del límite."""
+    if filas is not None and filas > LIMITE_FILAS:
+        raise ArchivoGrande(f"Tu archivo tiene {filas:,} filas de ventas y el tablero acepta hasta "
+                            f"{LIMITE_FILAS:,}. Sube un periodo más corto, por ejemplo unos meses, "
+                            f"o [escríbeme por WhatsApp]({WHATSAPP}).")
+
+
 def leer_libro(contenido):
-    """Recibe los bytes del Excel y devuelve (ventas, gastos por mes, inventario)."""
+    """Recibe los bytes del Excel y devuelve (ventas, gastos por mes, inventario, avisos)."""
+    filas = contar_filas(contenido)
+    revisar_tamano(filas - 1 if filas else None)  # sin contar los títulos
     try:
         hojas = pd.read_excel(BytesIO(contenido), sheet_name=None, engine="openpyxl")
     except Exception as error:
         raise ErrorFormato("El archivo no se pudo abrir como Excel (.xlsx).") from error
-    ventas = limpiar_ventas(leer_hoja(hojas, "Ventas", COLUMNAS_VENTAS))
-    gastos = limpiar_gastos(leer_hoja(hojas, "Gastos", COLUMNAS_GASTOS))
+    revisar_tamano(len(hojas[buscar_hoja(hojas, "Ventas")].dropna(how="all")))  # por si no se pudo contar
+    avisos = []
+    ventas = limpiar_ventas(leer_hoja(hojas, "Ventas", COLUMNAS_VENTAS), avisos)
+    gastos = limpiar_gastos(leer_hoja(hojas, "Gastos", COLUMNAS_GASTOS), avisos)
     inventario = limpiar_inventario(leer_hoja(hojas, "Inventario", COLUMNAS_INVENTARIO))
-    return ventas, gastos, inventario
+    return ventas, gastos, inventario, avisos
 
 
 @st.cache_data(show_spinner="Cargando datos…")
@@ -443,7 +539,7 @@ def elegir_origen():
         negocio = st.text_input("Nombre del negocio", max_chars=60, placeholder=NEGOCIO_VACIO)
         st.caption("Debe tener las hojas Ventas, Gastos e Inventario con las mismas columnas que el ejemplo.")
         subido = st.file_uploader("Sube tu archivo de Excel", type="xlsx")
-        st.caption("Tu archivo se procesa solo durante tu visita y no se guarda.")
+        st.caption("Máximo 10 MB. Tu archivo se procesa solo durante tu visita y no se guarda.")
         st.download_button("Descargar hoja para llenar", PLANTILLA.read_bytes(), file_name=PLANTILLA.name,
                            mime=MIME_EXCEL, width="stretch")
         st.download_button("Descargar Excel de ejemplo", ARCHIVO_DEMO.read_bytes(),
@@ -573,13 +669,21 @@ def main():
 
     libro, origen = None, "demo"
     if subido is None:
-        st.session_state.pop("libro", None)
-        st.session_state.pop("libro_id", None)
+        for llave in ("libro", "libro_id", "fallo_id"):
+            st.session_state.pop(llave, None)
+    elif st.session_state.get("fallo_id") == subido.file_id:
+        st.error(f"{MENSAJE_ERROR} Mientras, te muestro el tablero de ejemplo.")
     else:
         try:
             libro, origen = cargar_subido(subido), subido.file_id
+        except ArchivoGrande as error:
+            st.warning(f"{error} Mientras, te muestro el tablero de ejemplo.")
         except ErrorFormato as error:
-            st.error(f"No pude leer tu Excel. {error} Te muestro los datos de ejemplo.")
+            st.error(f"No pudimos leer tu archivo: {error} Revisa que tenga el formato de la hoja para llenar "
+                     f"o [escríbeme por WhatsApp]({WHATSAPP}). Mientras, te muestro el tablero de ejemplo.")
+        except Exception as error:
+            print(f"Error al leer un Excel subido: {type(error).__name__}", flush=True)  # nunca datos del archivo
+            st.error(f"{MENSAJE_ERROR} Mientras, te muestro el tablero de ejemplo.")
 
     es_demo = libro is None
     if es_demo:
@@ -591,7 +695,27 @@ def main():
     st.set_page_config(page_title=titulo, page_icon="📊", layout="wide")
     zona_titulo.title(titulo)
 
-    ventas, gastos, inventario = libro
+    zona = st.empty()  # si algo falla a medio dibujar, se vacía y se muestra el ejemplo
+    try:
+        with zona.container():
+            mostrar_tablero(libro, origen, es_demo, nombre_negocio)
+    except Exception as error:
+        if es_demo:
+            raise
+        print(f"Error al procesar un Excel subido: {type(error).__name__}", flush=True)
+        zona.empty()
+        for llave in ("libro", "libro_id"):
+            st.session_state.pop(llave, None)
+        st.session_state["fallo_id"] = subido.file_id
+        st.rerun()
+
+
+def mostrar_tablero(libro, origen, es_demo, nombre_negocio):
+    """Dibuja avisos, filtros, indicadores, gráficas y pie."""
+    ventas, gastos, inventario, avisos = libro
+    if not es_demo:
+        for aviso in avisos:
+            st.warning(aviso)
     inicio, fin, categorias, metodos = elegir_filtros(ventas, origen)
     filtradas = filtrar_ventas(ventas, inicio, fin, categorias, metodos)
 
